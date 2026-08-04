@@ -1,6 +1,6 @@
 # gps-relay
 
-Zero-storage WebSocket relay for [gps-bridge](https://github.com/myasaliu/gps-bridge).
+Zero-storage WebSocket relay for [gps-bridge](https://github.com/luna61ouo/gps-bridge).
 
 ## What it does
 
@@ -21,7 +21,7 @@ Phone ──[encrypted GPS]──► /ws/{token} ──► OpenClaw (gps-bridge)
 ## Setup
 
 ```bash
-git clone https://github.com/myasaliu/gps-relay.git
+git clone https://github.com/luna61ouo/gps-relay.git
 cd gps-relay
 python3 -m venv venv
 source venv/bin/activate
