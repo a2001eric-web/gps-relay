@@ -14,6 +14,8 @@ Phone ──[encrypted GPS]──► /ws/{token} ──► OpenClaw (gps-bridge)
 - Open-source so anyone can verify the zero-storage guarantee
 - Only gps-bridge-shaped messages are relayed, so it cannot be repurposed
   as a general chat / file-transfer channel
+- When a connection drops, the others in the same room are told, so a client
+  can tell "peer is offline" from "peer is quiet"
 
 ## Requirements
 
@@ -47,6 +49,24 @@ Phone and OpenClaw connect to:
 ```
 wss://yourdomain.com/relay/ws/{token}
 ```
+
+## Peer disconnect notification
+
+When a connection leaves a room, every connection still in that room receives
+exactly:
+
+```
+{"type":"peer_disconnected"}
+```
+
+This is the only message the relay originates itself. It says nothing about
+who left, is not counted against any rate limit, and is not sent when the room
+is left empty.
+
+The byte encoding is part of the contract: gps-bridge compares incoming frames
+against this literal with `==`, so the relay sends a fixed string rather than
+re-serialising a dict. `json.dumps({"type": "peer_disconnected"})` would insert
+a space after the colon and the comparison would silently never match.
 
 ## Health check
 

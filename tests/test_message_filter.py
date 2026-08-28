@@ -10,6 +10,12 @@ The "happy path" case uses a genuine end-to-end encrypted envelope produced by
 gps-bridge's own crypto module, so the test proves the filter accepts real
 traffic rather than a hand-written imitation of it.
 
+It also covers the peer_disconnected notification.  The literal the relay sends
+is compared against the literal gps-bridge actually tests for -- read straight
+out of gps_bridge/connector.py, not retyped here -- so a whitespace change on
+either side fails the test instead of silently breaking phone-offline
+detection in production.
+
 Run:
     python3 tests/test_message_filter.py
 
@@ -28,9 +34,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -78,6 +86,23 @@ def real_encrypted_packet() -> str:
         }
     ).encode()
     return json.dumps(encrypt_payload(plaintext, receiver_public))
+
+
+#: The comparison gps-bridge performs on every incoming frame, extracted from
+#: its source rather than retyped, so this test tracks the real consumer:
+#:     if raw == '{"type":"peer_disconnected"}':
+BRIDGE_COMPARISON_RE = re.compile(
+    r"""raw\s*==\s*(?P<q>['"])(?P<literal>.*?peer_disconnected.*?)(?P=q)"""
+)
+
+
+def bridge_expected_literal() -> str:
+    """Return the exact string gps-bridge's connector compares raw frames to."""
+    connector = GPS_BRIDGE_ROOT / "gps_bridge" / "connector.py"
+    match = BRIDGE_COMPARISON_RE.search(connector.read_text())
+    if not match:
+        raise RuntimeError(f"no peer_disconnected comparison found in {connector}")
+    return match.group("literal")
 
 
 PASS = "PASS"  # expected to be relayed
@@ -252,6 +277,102 @@ async def check_total_token_cap() -> tuple[bool, str]:
         await asyncio.sleep(1.0)
 
 
+# ---------------------------------------------------------------------------
+# peer_disconnected notification
+# ---------------------------------------------------------------------------
+
+
+async def check_peer_disconnected_pair() -> tuple[bool, str]:
+    """Two connections in a room; one leaves, the other must be told."""
+    url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
+    async with websockets.connect(url, max_size=WS_MAX_SIZE) as survivor:
+        leaver = await websockets.connect(url, max_size=WS_MAX_SIZE)
+        await leaver.close()
+        try:
+            got = await asyncio.wait_for(survivor.recv(), timeout=5)
+        except asyncio.TimeoutError:
+            return False, "survivor was never notified (timed out after 5s)"
+        except ConnectionClosed as exc:
+            return False, f"survivor was closed instead ({exc.code})"
+    if got != '{"type":"peer_disconnected"}':
+        return False, f"received {got!r}"
+    return True, f"received {got!r}"
+
+
+async def check_peer_disconnected_matches_bridge() -> tuple[bool, str]:
+    """
+    The single most important case: feed what the relay actually sent into the
+    comparison gps-bridge actually performs, and require True.
+    """
+    expected = bridge_expected_literal()
+    url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
+    async with websockets.connect(url, max_size=WS_MAX_SIZE) as survivor:
+        leaver = await websockets.connect(url, max_size=WS_MAX_SIZE)
+        await leaver.close()
+        try:
+            raw = await asyncio.wait_for(survivor.recv(), timeout=5)
+        except asyncio.TimeoutError:
+            return False, "nothing received to compare"
+
+    # This is gps-bridge's connector.py line, verbatim.
+    matched = raw == expected
+    if not matched:
+        return False, f"relay sent {raw!r}, bridge tests for {expected!r}"
+    return True, f"raw == {expected!r} -> True"
+
+
+async def check_peer_disconnected_three() -> tuple[bool, str]:
+    """Three connections in a room; one leaves, both survivors must be told."""
+    url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
+    async with websockets.connect(url, max_size=WS_MAX_SIZE) as first:
+        async with websockets.connect(url, max_size=WS_MAX_SIZE) as second:
+            leaver = await websockets.connect(url, max_size=WS_MAX_SIZE)
+            await leaver.close()
+            received = []
+            for label, ws in (("first", first), ("second", second)):
+                try:
+                    received.append(await asyncio.wait_for(ws.recv(), timeout=5))
+                except asyncio.TimeoutError:
+                    return False, f"{label} survivor was not notified"
+    wrong = [r for r in received if r != '{"type":"peer_disconnected"}']
+    if wrong:
+        return False, f"unexpected payload {wrong[0]!r}"
+    return True, f"both survivors notified ({len(received)}/2)"
+
+
+async def check_peer_disconnected_solo(log_path: Path) -> tuple[bool, str]:
+    """
+    A lone connection leaving has nobody to notify.  The room must still be
+    released and the relay must not raise -- checked by scanning the relay's
+    own stderr for a traceback appearing during this window.
+    """
+    before_log = log_path.read_text() if log_path.exists() else ""
+    before = active_tokens()
+
+    url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
+    solo = await websockets.connect(url, max_size=WS_MAX_SIZE)
+    await solo.close()
+    await asyncio.sleep(0.5)
+
+    after = active_tokens()
+    new_log = (log_path.read_text() if log_path.exists() else "")[len(before_log):]
+    if "Traceback" in new_log or "Exception in" in new_log:
+        first_line = new_log.strip().splitlines()[0][:80]
+        return False, f"relay logged an error: {first_line}"
+    if after != before:
+        return False, f"room not released (active_tokens {before} -> {after})"
+
+    # Still serving afterwards?
+    try:
+        async with websockets.connect(
+            f"ws://{HOST}:{PORT}/ws/{new_token()}", max_size=WS_MAX_SIZE
+        ):
+            pass
+    except Exception as exc:
+        return False, f"relay unusable afterwards: {type(exc).__name__}"
+    return True, f"no traceback, active_tokens {before} -> {after}, relay still serving"
+
+
 async def wait_for_server(proc: subprocess.Popen, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
@@ -272,6 +393,10 @@ async def main() -> int:
         return int(bool(print(f"missing {uvicorn_bin}; create the venv first")))
 
     print(f"Starting test relay on {HOST}:{PORT} (production 8767 untouched)...")
+    # The relay's own stderr, so the solo-disconnect case can prove no
+    # exception was raised rather than merely assuming it.  Deleted at the end.
+    log_fd, log_name = tempfile.mkstemp(prefix="gps-relay-test-", suffix=".log")
+    log_path = Path(log_name)
     proc = subprocess.Popen(
         [
             str(uvicorn_bin),
@@ -286,9 +411,10 @@ async def main() -> int:
             "warning",
         ],
         cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fd,
+        stderr=log_fd,
     )
+    os.close(log_fd)
 
     results: list[tuple[str, object, bool, str]] = []
     try:
@@ -305,6 +431,21 @@ async def main() -> int:
         ok, detail = await check_total_token_cap()
         results.append(("Global room cap (MAX_TOTAL_TOKENS)", "refuse", ok, detail))
 
+        # peer_disconnected notification
+        ok, detail = await check_peer_disconnected_pair()
+        results.append(("2 in room, 1 leaves -> peer notified", "notify", ok, detail))
+
+        ok, detail = await check_peer_disconnected_matches_bridge()
+        results.append(
+            ("Sent literal passes gps-bridge's `raw ==` test", "True", ok, detail)
+        )
+
+        ok, detail = await check_peer_disconnected_three()
+        results.append(("3 in room, 1 leaves -> both notified", "notify", ok, detail))
+
+        ok, detail = await check_peer_disconnected_solo(log_path)
+        results.append(("Lone connection leaves -> clean, no raise", "clean", ok, detail))
+
         left = active_tokens()
         results.append(
             (
@@ -320,6 +461,7 @@ async def main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:  # pragma: no cover
             proc.kill()
+        log_path.unlink(missing_ok=True)
 
     width = max(len(r[0]) for r in results)
     print(f"{'CASE'.ljust(width)} | EXPECT  | RESULT | DETAIL")
