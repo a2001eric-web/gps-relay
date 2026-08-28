@@ -9,9 +9,12 @@ Phone ──[encrypted GPS]──► /ws/{token} ──► OpenClaw (gps-bridge)
 ```
 
 - Messages are forwarded in real-time between paired connections
-- **Nothing is ever written to disk** — not even the token
+- **The relay process never writes to disk** — not the token, not a message
 - Active connections are held in RAM only and disappear when disconnected
 - Open-source so anyone can verify the zero-storage guarantee
+- The guarantee covers this process only. The token is part of the URL path,
+  so **your reverse proxy will log it** unless you turn that off — see
+  [Nginx](#nginx-tls) below
 - Only gps-bridge-shaped messages are relayed, so it cannot be repurposed
   as a general chat / file-transfer channel
 - When a connection drops, the others in the same room are told, so a client
@@ -42,6 +45,13 @@ location /relay/ {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
+
+    # The token is in the request path, so the default access log writes every
+    # user's token to disk in plaintext, indefinitely. The token is the room
+    # key: anyone holding it can join the room and receive its traffic.
+    # The relay itself stores nothing; this line is what keeps that true for
+    # the deployment as a whole.
+    access_log off;
 }
 ```
 
@@ -49,6 +59,34 @@ Phone and OpenClaw connect to:
 ```
 wss://yourdomain.com/relay/ws/{token}
 ```
+
+### Keeping the log but masking the token
+
+If you want request logging for the relay, log a masked path instead of the
+real one. `map` and `log_format` go at `http` level, not inside `location`:
+
+```nginx
+map $request_uri $relay_uri_masked {
+    "~^(/relay/ws/)"  "$1***";
+    default           $request_uri;
+}
+
+log_format relay_masked '$remote_addr [$time_local] '
+                        '"$request_method $relay_uri_masked" $status $body_bytes_sent';
+```
+
+then in the `location` block, replace `access_log off;` with:
+
+```nginx
+access_log /var/log/nginx/relay.log relay_masked;
+```
+
+Two things this does not cover:
+
+- `error_log` at `info` or `debug` level records the full URI. Keep it at
+  `warn` or higher.
+- Any log already on disk from before. Existing tokens stay valid, so rotating
+  the old logs out is not enough on its own — re-pair to retire them.
 
 ## Peer disconnect notification
 
