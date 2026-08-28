@@ -23,8 +23,13 @@ Interpreters:
     * the relay is started with the project venv (venv/bin/uvicorn) --
       that is the exact binary production uses;
     * this script itself needs `websockets` + `cryptography` (for gps-bridge's
-      crypto module).  On Luke's box the system python3 has both, so the usual
-      invocation is `/usr/bin/python3 tests/test_message_filter.py`.
+      crypto module).  If your system python3 has both, `python3
+      tests/test_message_filter.py` is enough; otherwise run it from a venv
+      that does.
+
+Set GPS_BRIDGE_ROOT to point at a gps-bridge checkout if it is not a sibling
+directory of this repository.  Tests that need real encrypted payloads are
+skipped when it cannot be found.
 
 Nothing is written to disk by the relay; this script only prints a result table.
 """
@@ -44,7 +49,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GPS_BRIDGE_ROOT = Path(
-    os.environ.get("GPS_BRIDGE_ROOT", "/mnt/SPSSD/luke/gps-bridge")
+    os.environ.get("GPS_BRIDGE_ROOT", str(REPO_ROOT.parent / "gps-bridge"))
 )
 
 PORT = int(os.environ.get("RELAY_TEST_PORT", "8768"))

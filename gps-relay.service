@@ -1,12 +1,23 @@
+# Example systemd unit for gps-relay.
+#
+# Copy to /etc/systemd/system/gps-relay.service and edit the two
+# placeholders below to match your own installation:
+#   YOUR_USER      - the unprivileged user that should run the relay
+#   /opt/gps-relay - wherever you cloned this repository
+#
+# Then:  sudo systemctl daemon-reload && sudo systemctl enable --now gps-relay
+
 [Unit]
 Description=gps-relay WebSocket relay server
 After=network.target
 
 [Service]
 Type=simple
-User=luke
-WorkingDirectory=/home/luke/gps-relay
-ExecStart=/home/luke/gps-relay/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8767 --ws-max-size 16384
+User=YOUR_USER
+WorkingDirectory=/opt/gps-relay
+# --ws-max-size caps a single WebSocket frame before it reaches the
+# application-level 8 KB check (defence in depth; uvicorn defaults to 16 MB).
+ExecStart=/opt/gps-relay/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8767 --ws-max-size 16384
 Restart=on-failure
 RestartSec=5
 
