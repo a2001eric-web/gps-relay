@@ -56,21 +56,46 @@ PORT = int(os.environ.get("RELAY_TEST_PORT", "8768"))
 HOST = "127.0.0.1"
 WS_MAX_SIZE = 16384  # must match the production uvicorn flag
 
-sys.path.insert(0, str(GPS_BRIDGE_ROOT))
-
 try:
     import websockets
     from websockets.exceptions import ConnectionClosed
 except ImportError:  # pragma: no cover
     sys.exit("This test needs the `websockets` package (try /usr/bin/python3).")
 
-try:
-    from gps_bridge.crypto import encrypt_payload, generate_keypair
-except ImportError as exc:  # pragma: no cover
-    sys.exit(
-        f"Cannot import gps_bridge.crypto from {GPS_BRIDGE_ROOT} ({exc}).\n"
-        "This test needs the `cryptography` package (try /usr/bin/python3)."
-    )
+#: Sentinel used in the result table for cases that could not be run because
+#: an optional dependency (gps-bridge) is absent.  Skipped != failed.
+SKIP = "SKIP"
+
+#: How many cases in this file need a real gps-bridge checkout.
+BRIDGE_DEPENDENT_CASES = 2
+
+BRIDGE_CONNECTOR = GPS_BRIDGE_ROOT / "gps_bridge" / "connector.py"
+BRIDGE_CRYPTO = GPS_BRIDGE_ROOT / "gps_bridge" / "crypto.py"
+
+encrypt_payload = generate_keypair = None
+
+# The checkout is looked for on disk *before* importing, and GPS_BRIDGE_ROOT is
+# put at the front of sys.path, so this test always exercises the gps-bridge it
+# was pointed at -- never some other copy that happens to be installed on the
+# host.
+if not (BRIDGE_CRYPTO.is_file() and BRIDGE_CONNECTOR.is_file()):
+    GPS_BRIDGE_ERROR = f"no gps-bridge checkout at {GPS_BRIDGE_ROOT}"
+else:
+    sys.path.insert(0, str(GPS_BRIDGE_ROOT))
+    try:
+        from gps_bridge.crypto import encrypt_payload, generate_keypair
+    except ImportError as exc:  # pragma: no cover - depends on the host
+        GPS_BRIDGE_ERROR = (
+            f"cannot import gps_bridge.crypto from {GPS_BRIDGE_ROOT} ({exc}); "
+            "it also needs the `cryptography` package"
+        )
+    else:
+        GPS_BRIDGE_ERROR = None
+
+#: True when everything this test needs from gps-bridge is present.  When it is
+#: False the cases that need real encrypted packets are reported as SKIP and
+#: every other case still runs; the script still exits 0.
+GPS_BRIDGE_AVAILABLE = GPS_BRIDGE_ERROR is None
 
 
 # ---------------------------------------------------------------------------
@@ -103,24 +128,33 @@ BRIDGE_COMPARISON_RE = re.compile(
 
 def bridge_expected_literal() -> str:
     """Return the exact string gps-bridge's connector compares raw frames to."""
-    connector = GPS_BRIDGE_ROOT / "gps_bridge" / "connector.py"
-    match = BRIDGE_COMPARISON_RE.search(connector.read_text())
+    match = BRIDGE_COMPARISON_RE.search(BRIDGE_CONNECTOR.read_text())
     if not match:
-        raise RuntimeError(f"no peer_disconnected comparison found in {connector}")
+        raise RuntimeError(
+            f"no peer_disconnected comparison found in {BRIDGE_CONNECTOR}"
+        )
     return match.group("literal")
 
 
 PASS = "PASS"  # expected to be relayed
 
 
-def build_cases() -> list[tuple[str, str, object]]:
+def build_cases() -> list[tuple[str, object, object]]:
     """Return [(description, raw_message, expectation)] where expectation is
-    PASS or the expected WebSocket close code."""
+    PASS or the expected WebSocket close code.
+
+    A raw_message of None means "this case needs gps-bridge and gps-bridge is
+    not available" -- the caller reports it as SKIP instead of running it.
+    """
     big_json = json.dumps({"type": "ping", "pad": "A" * 9000})
     assert 8192 < len(big_json.encode()) < WS_MAX_SIZE, len(big_json)
 
     return [
-        ("Real encrypted GPS packet (gps-bridge crypto)", real_encrypted_packet(), PASS),
+        (
+            "Real encrypted GPS packet (gps-bridge crypto)",
+            real_encrypted_packet() if GPS_BRIDGE_AVAILABLE else None,
+            PASS,
+        ),
         ('{"type":"ping"}', '{"type":"ping"}', PASS),
         ('{"type":"location_request"}', '{"type":"location_request"}', PASS),
         (
@@ -304,11 +338,18 @@ async def check_peer_disconnected_pair() -> tuple[bool, str]:
     return True, f"received {got!r}"
 
 
-async def check_peer_disconnected_matches_bridge() -> tuple[bool, str]:
+async def check_peer_disconnected_matches_bridge() -> tuple[object, str]:
     """
     The single most important case: feed what the relay actually sent into the
     comparison gps-bridge actually performs, and require True.
+
+    Needs gps-bridge on disk (the comparison is read out of its connector.py).
+    Whether the notification is *sent at all* is covered without gps-bridge by
+    check_peer_disconnected_pair / _three, which compare against a literal.
     """
+    if not GPS_BRIDGE_AVAILABLE:
+        return SKIP, f"needs gps-bridge -- {GPS_BRIDGE_ERROR}"
+
     expected = bridge_expected_literal()
     url = f"ws://{HOST}:{PORT}/ws/{new_token()}"
     async with websockets.connect(url, max_size=WS_MAX_SIZE) as survivor:
@@ -397,6 +438,13 @@ async def main() -> int:
     if not uvicorn_bin.exists():
         return int(bool(print(f"missing {uvicorn_bin}; create the venv first")))
 
+    if not GPS_BRIDGE_AVAILABLE:
+        print(
+            f"gps-bridge not found ({GPS_BRIDGE_ERROR}); "
+            f"{BRIDGE_DEPENDENT_CASES} test(s) needing real encrypted packets "
+            "were skipped -- set GPS_BRIDGE_ROOT to enable them.\n"
+        )
+
     print(f"Starting test relay on {HOST}:{PORT} (production 8767 untouched)...")
     # The relay's own stderr, so the solo-disconnect case can prove no
     # exception was raised rather than merely assuming it.  Deleted at the end.
@@ -426,6 +474,11 @@ async def main() -> int:
         await wait_for_server(proc)
         print("Relay ready.\n")
         for description, message, expectation in build_cases():
+            if message is None:
+                results.append(
+                    (description, expectation, SKIP, f"needs gps-bridge -- {GPS_BRIDGE_ERROR}")
+                )
+                continue
             ok, detail = await run_case(description, message, expectation)
             results.append((description, expectation, ok, detail))
 
@@ -473,11 +526,22 @@ async def main() -> int:
     print("-" * (width + 48))
     for description, expectation, ok, detail in results:
         expect = "relay" if expectation is PASS else str(expectation)
-        mark = "ok  " if ok else "FAIL"
+        mark = SKIP if ok is SKIP else ("ok  " if ok else "FAIL")
         print(f"{description.ljust(width)} | {expect:<7} | {mark}   | {detail}")
 
-    failed = [r for r in results if not r[2]]
-    print(f"\n{len(results) - len(failed)}/{len(results)} passed.")
+    failed = [r for r in results if r[2] is not SKIP and not r[2]]
+    skipped = [r for r in results if r[2] is SKIP]
+    passed = len(results) - len(failed) - len(skipped)
+
+    summary = f"{passed} passed"
+    if failed:
+        summary += f", {len(failed)} failed"
+    if skipped:
+        summary += f", {len(skipped)} skipped"
+    print(f"\n{summary} (of {len(results)} cases).")
+
+    # Skipped is not failed: a missing optional dependency must not turn the
+    # whole run red.
     return 1 if failed else 0
 
 

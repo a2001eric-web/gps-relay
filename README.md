@@ -160,6 +160,18 @@ Starts a second relay instance on port 8768 and drives it with real WebSocket
 clients, including a genuine encrypted packet built with gps-bridge's own
 crypto module. Requires `websockets` and `cryptography`.
 
+The two cases that need real encrypted packets look for a gps-bridge checkout
+next to this repository. If it is somewhere else, point `GPS_BRIDGE_ROOT` at
+it:
+
+```bash
+GPS_BRIDGE_ROOT=/path/to/gps-bridge python3 tests/test_message_filter.py
+```
+
+If gps-bridge cannot be found those two cases are reported as `SKIP`, every
+other case still runs, and the script still exits `0` — a missing optional
+dependency is not a test failure.
+
 ## License
 
 MIT
