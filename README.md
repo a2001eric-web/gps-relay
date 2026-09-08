@@ -46,11 +46,21 @@ Phone and OpenClaw connect to:
 wss://yourdomain.com/relay/ws/{token}
 ```
 
+Sovereign native-chat clients may use the isolated streaming room:
+```
+wss://yourdomain.com/relay/chat/{token}
+```
+
+The legacy `/ws` room recognizes authenticated native-chat envelopes and
+applies their separate bounded streaming quota, so existing installed clients
+remain compatible. GPS/device messages keep their original low-frequency
+limit. Every frame is capped at 512 KiB and the relay still stores nothing.
+
 ## Health check
 
 ```
 GET /health
-→ {"status": "ok", "active_tokens": 2}
+→ {"status": "ok", "active_tokens": 2, "active_rooms": 3}
 ```
 
 ## License
