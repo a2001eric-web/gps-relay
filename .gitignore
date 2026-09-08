@@ -1,6 +1,7 @@
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Operator-side connection statistics. Never publish: contains token prefixes
 # and client IPs of real users.
