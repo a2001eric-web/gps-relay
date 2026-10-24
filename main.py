@@ -46,6 +46,7 @@ MAX_CHAT_MESSAGE_BYTES = 512 * 1024
 
 ENCRYPTED_ENVELOPE_FIELDS = ("ephemeral_pub", "nonce", "ciphertext", "tag")
 NATIVE_CHAT_WIRE_TYPE = "sovereign_mobile_chat"
+PHONE_SSH_WIRE_TYPE = "sovereign_phone_ssh"
 NATIVE_CHAT_ENVELOPE_FIELDS = frozenset(
     {"type", "v", "direction", "nonce", "ciphertext", "tag"}
 )
@@ -107,6 +108,15 @@ def is_native_chat_message(payload: dict) -> bool:
 
 
 def _traffic_lane(payload: dict, *, channel: str) -> str | None:
+    # Paired SSH has the same opaque envelope shape and bounded large replies.
+    # Keep it on the device room; it never becomes a plaintext chat message.
+    if channel == "legacy" and (
+        payload.get("type") == PHONE_SSH_WIRE_TYPE
+        and NATIVE_CHAT_ENVELOPE_FIELDS.issubset(payload)
+        and payload.get("v") == 1
+        and payload.get("direction") in {"phone_to_mac", "mac_to_phone"}
+    ):
+        return "chat"
     if is_native_chat_message(payload):
         return "chat"
     if channel == "legacy" and is_gps_message(payload):

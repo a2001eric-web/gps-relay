@@ -98,3 +98,27 @@ def test_health_counts_tokens_not_rooms() -> None:
 def test_native_chat_marker_without_envelope_fields_stays_in_gps_lane() -> None:
     payload = {"type": main.NATIVE_CHAT_WIRE_TYPE}
     assert main._traffic_lane(payload, channel="legacy") == "gps"
+
+
+def test_phone_ssh_large_reply_uses_bounded_large_lane_only_in_device_room() -> None:
+    client = TestClient(main.app)
+    frame = native_chat_frame(type=main.PHONE_SSH_WIRE_TYPE, ciphertext="c" * 100000)
+    assert main._traffic_lane(json.loads(frame), channel="chat") is None
+    with (
+        client.websocket_connect(f"/ws/{TOKEN}") as sender,
+        client.websocket_connect(f"/ws/{TOKEN}") as receiver,
+    ):
+        for _ in range(main.GPS_RATE_LIMIT + 2):
+            sender.send_text(frame)
+            assert receiver.receive_text() == frame
+        sender.send_text(native_chat_frame(
+            type=main.PHONE_SSH_WIRE_TYPE,
+            ciphertext="c" * main.MAX_CHAT_MESSAGE_BYTES,
+        ))
+        with pytest.raises(WebSocketDisconnect) as caught:
+            sender.receive_text()
+        assert caught.value.code == 4013
+
+
+def test_phone_ssh_marker_alone_does_not_bypass_gps_limits() -> None:
+    assert main._traffic_lane({"type": main.PHONE_SSH_WIRE_TYPE}, channel="legacy") == "gps"
